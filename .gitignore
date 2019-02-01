@@ -1,2 +1,15 @@
-qrexec/__pycache__
-pkgs/
+/qrexec/__pycache__
+/pkgs/
+*.o
+.*.sw[op]
+/agent/qrexec-fork-server
+/agent/qrexec-client-vm
+/agent/qrexec-agent
+/qrexec.egg-info
+*.patch
+*.diff
+*.orig
+*.rej
+*.so.2
+*~
+\#*#
