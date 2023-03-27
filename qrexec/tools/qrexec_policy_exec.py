@@ -18,6 +18,7 @@
 # License along with this library; if not, see <https://www.gnu.org/licenses/>.
 #
 
+from __future__ import annotations
 import argparse
 import logging
 import logging.handlers
@@ -35,7 +36,7 @@ from ..policy.utils import PolicyCache
 from ..server import call_socket_service
 
 
-def create_default_policy(service_name):
+def create_default_policy(service_name: str):
     with open(str(POLICYPATH / service_name), "w", encoding='utf-8') as policy:
         policy.write(DEFAULT_POLICY)
 

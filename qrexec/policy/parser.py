@@ -22,6 +22,7 @@
 
 """Qrexec policy parser and evaluator"""
 
+from __future__ import annotations
 import abc
 import collections
 import collections.abc
@@ -33,10 +34,19 @@ import pathlib
 import string
 
 from typing import (
+    Any,
+    Collection,
+    FrozenSet,
+    Generator,
     Iterable,
     List,
+    NoReturn,
+    Sequence,
+    Set,
     TextIO,
     Tuple,
+    TYPE_CHECKING,
+    Type,
     Dict,
     Optional,
     Set,
@@ -103,7 +113,7 @@ def parse_service_and_argument(rpcname: Union[str, pathlib.PurePath], *,
     A `Path` from :py:mod:`pathlib` is also accepted, in which case the filename
     is parsed.
     """
-    if isinstance(rpcname, pathlib.PurePath):
+    if isinstance(rpcname, pathlib.Path):
         rpcname = rpcname.name
 
     if "+" in rpcname:
@@ -119,16 +129,14 @@ def get_invalid_characters(s: str,
                            disallowed: Iterable[str]="") -> Sequence[str]:
     """Return characters contained in *disallowed* and/or not int *allowed*"""
     # pylint: disable=invalid-name
-    return tuple(
-        sorted(set(c for c in s if c not in allowed.difference(disallowed)))
-    )
+    return sorted(set(c for c in s if c not in allowed.difference(disallowed)))
 
 
 def validate_service_and_argument(
     service: Optional[str],
     argument: Optional[str],
     *,
-    filepath: pathlib.Path,
+    filepath: Union[None, pathlib.Path, pathlib.PurePosixPath, str],
     lineno: Optional[int],
 ) -> Tuple[Optional[str], Optional[str]]:
     """Check service name and argument
@@ -139,20 +147,20 @@ def validate_service_and_argument(
     cases is too long total call name.
 
     Args:
-        service (str): the service as appeared in policy file
-        argument (str): the argument as appeared in policy file
-        filepath (pathlib.Path): the file path
-        lineno (int): the line in the file
+        service: the service as appeared in policy file
+        argument: the argument as appeared in policy file
+        filepath: the file path
+        lineno: the line in the file
 
     Returns:
-        (str or None, str or None): service and argument
+        service and argument
 
     Raises:
         qrexec.exc.PolicySyntaxError: for a number of forbidden cases
     """
 
-    if service == "*":
-        service = None
+    service = None if service == "*" else service
+    argument = None if argument == "*" else argument
 
     if service is not None:
         invalid_chars = get_invalid_characters(service, disallowed="+")
@@ -164,9 +172,6 @@ def validate_service_and_argument(
                     service, invalid_chars
                 ),
             )
-
-    if argument == "*":
-        argument = None
 
     if argument is not None:
         invalid_chars = get_invalid_characters(argument)
@@ -196,17 +201,21 @@ def validate_service_and_argument(
 
 class VMTokenMeta(abc.ABCMeta):
     # pylint: disable=missing-docstring
-    exacts: collections.OrderedDict[str, Type[str]] = collections.OrderedDict()
-    prefixes: collections.OrderedDict[str, Type[str]] = collections.OrderedDict()
+    exacts: collections.OrderedDict[str, VMTokenMeta] = collections.OrderedDict()
+    prefixes: collections.OrderedDict[str, VMTokenMeta] = collections.OrderedDict()
 
-    def __init__(cls, name: str, bases: Tuple[type], dict_: Dict[str, str]):
+    def __init__(cls: VMTokenMeta, name: str, bases: Tuple[type, ...], dict_: Dict[str, object]) -> None:
         super().__init__(name, bases, dict_)
 
         assert not ("EXACT" in dict_ and "PREFIX" in dict_)
         if "EXACT" in dict_:
-            cls.exacts[dict_["EXACT"]] = cls # type: ignore
+            v = dict_["EXACT"]
+            assert isinstance(v, str)
+            cls.exacts[v] = cls
         if "PREFIX" in dict_:
-            cls.prefixes[dict_["PREFIX"]] = cls # type: ignore
+            v = dict_["PREFIX"]
+            assert isinstance(v, str)
+            cls.prefixes[v] = cls
 
 
 class VMToken(str, metaclass=VMTokenMeta):
@@ -250,7 +259,7 @@ class VMToken(str, metaclass=VMTokenMeta):
                 # tokens can be used where
                 continue
             if token == exact:
-                return super().__new__(token_cls, token)
+                return super().__new__(token_cls, token) #type: ignore
 
         # for prefixed tokens, we pass just suffixes
         for prefix, token_cls in cls.prefixes.items():
@@ -268,7 +277,7 @@ class VMToken(str, metaclass=VMTokenMeta):
                     # we are either part of a longer prefix (@dispvm:@tag: etc),
                     # or the token is invalid, in which case this will fallthru
                     continue
-                return super().__new__(token_cls, token)
+                return super().__new__(token_cls, token) # type: ignore
 
         # the loop didn't find any valid prefix, so this is not a valid token
         raise PolicySyntaxError(
@@ -281,7 +290,7 @@ class VMToken(str, metaclass=VMTokenMeta):
     filepath: Optional[pathlib.Path]
     lineno: Optional[int]
     def __init__(self, token: str, *, filepath: Optional[pathlib.Path]=None,
-                 lineno: Optional[int]=None):
+                 lineno: Optional[int]=None) -> None:
         # pylint: disable=unused-argument
         super().__init__()
         self.filepath = filepath
@@ -290,10 +299,9 @@ class VMToken(str, metaclass=VMTokenMeta):
             self.value = self[len(self.PREFIX) :] # type: ignore
             assert self.value[0] != "@"
         except AttributeError:
-            # self.value = self
             pass
 
-    #   def __repr__(self):
+    #   def __repr__(self) -> str:
     #       return '<{} value={!r} filepath={} lineno={}>'.format(
     #           type(self).__name__, str(self), self.filepath, self.lineno)
 
@@ -612,7 +620,7 @@ class DispVMTag(Source, Target):
 
         return True
 
-    def expand(self, *, system_info: FullSystemInfo) -> Iterable[VMToken]:
+    def expand(self, *, system_info: FullSystemInfo) -> Iterable[DispVMTemplate]:
         for name, domain in system_info["domains"].items():
             if self.value in domain["tags"] and domain["template_for_dispvms"]:
                 yield DispVMTemplate("@dispvm:" + name)
@@ -626,6 +634,11 @@ class DispVMTag(Source, Target):
 class AbstractResolution(metaclass=abc.ABCMeta):
     """Object representing positive policy evaluation result -
     either ask or allow action"""
+    __slots__ = ('rule', 'request', 'user', 'notify')
+    rule: Rule
+    request: Request
+    user: Optional[str]
+    notify: bool
 
     notify: bool
     def __init__(self, rule: "Rule", request: "Request", *, user: Optional[str]):
@@ -728,7 +741,7 @@ class AskResolution(AbstractResolution):
                  # default target, or None
                  default_target: Optional[str],
                  autostart: bool,
-                 user: Optional[str]):
+                 user: Optional[str]) -> None:
         super().__init__(rule, request, user=user)
         assert default_target is None or default_target in targets_for_ask
         self.targets_for_ask = targets_for_ask
@@ -810,6 +823,17 @@ class Request:
         ask_resolution_type (type): a child of :py:class:`AskResolution`
     """
 
+    target: VMToken
+    __slots__ = (
+        'service',
+        'argument',
+        'source',
+        'target',
+        'system_info',
+        'allow_resolution_type',
+        'ask_resolution_type',
+    )
+
     def __init__(
         self,
         service: Optional[str],
@@ -824,8 +848,8 @@ class Request:
 
         if target == "":
             target = "@default"
-        assert argument and argument[0] == "+"
-
+        assert argument, f'Argument is falsy value {argument!r}'
+        assert argument[0] == "+", f'Argument {argument!r} does not start with +'
         #: the service that is being requested
         self.service = service
         #: argument for the service
@@ -860,6 +884,7 @@ class ActionType(metaclass=abc.ABCMeta):
     this defines, what params are valid for which action.
     """
 
+    rule: Rule
     target: Optional[_BaseTarget]
     def __init__(self, rule: "Rule"):
         #: the rule that holds this action
@@ -874,7 +899,7 @@ class ActionType(metaclass=abc.ABCMeta):
         a resolution or raise exception.
 
         Args:
-            request (Request): the request that was matched to the rule
+            request: the request that was matched to the rule
 
         Returns:
             AbstractResolution: for successful requests
@@ -1047,8 +1072,8 @@ class Ask(ActionType):
             default_target, filepath=self.rule.filepath, lineno=self.rule.lineno
         )
         self.user = user
-        self.notify = False if notify is None else notify
-        self.autostart = True if autostart is None else autostart
+        self.notify = notify
+        self.autostart = autostart
 
     def __repr__(self) -> str:
         return "<{} target={!r} default_target={!r} user={!r}>".format(
@@ -1260,7 +1285,14 @@ class Rule:
         return return_str
 
     @classmethod
-    def from_line(cls, policy, line, *, filepath, lineno):
+    def from_line(
+        cls,
+        policy: 'AbstractParser',
+        line: str,
+        *,
+        filepath: pathlib.PurePosixPath,
+        lineno: int,
+    ) -> Rule:
         """
         Load a single line of qrexec policy and check its syntax.
         Do not verify existence of named objects.
@@ -1297,8 +1329,15 @@ class Rule:
 
     @classmethod
     def from_line_service(
-        cls, policy, service, argument, line, *, filepath, lineno
-    ):
+        cls,
+        policy: 'AbstractParser',
+        service: Optional[str],
+        argument: Optional[str],
+        line: str,
+        *,
+        filepath: pathlib.PurePosixPath,
+        lineno: int,
+    ) -> Rule:
         """Load a single line in old format.
 
         Args:
@@ -1318,7 +1357,7 @@ class Rule:
                 filepath, lineno, "wrong number of fields"
             ) from err
 
-        action_and_params = tuple(
+        action_and_params = list(
             itertools.chain(*(p.split(",") for p in action_and_params))
         )
 
@@ -1382,31 +1421,44 @@ class Rule:
 class AbstractParser(metaclass=abc.ABCMeta):
     """A minimal, pluggable, validating policy parser"""
 
-    #: default rule type
-    rule_type = Rule
-
+    __slots__ = ('rule_type','rules')
+    rule_type: Type[Rule]
+    def __init__(self) -> None:
+        self.rule_type = Rule
     @staticmethod
-    def _fix_filepath(file, filepath):
-        if filepath and not isinstance(filepath, pathlib.Path):
-            filepath = pathlib.Path(filepath)
+    def _fix_filepath(
+        file: Union[pathlib.Path, io.IOBase, TextIO],
+        filepath: Union[str, pathlib.Path, pathlib.PurePosixPath, None],
+    ) -> Tuple[Any, pathlib.Path]:
         if filepath is None:
             try:
-                filepath = pathlib.Path(file.name)
+                filepath_ = pathlib.Path(file.name) # type: ignore
             except AttributeError:
                 if isinstance(file, io.IOBase):
-                    filepath = "<buffer>"
-        return file, filepath
+                    filepath_ = pathlib.Path("<buffer>")
+                else:
+                    raise
+        elif isinstance(filepath, pathlib.Path):
+            filepath_ = filepath
+        else:
+            filepath_ = pathlib.Path(filepath)
+        return file, filepath_
 
-    def load_policy_file(self, file, filepath):
+    def load_policy_file(
+        self,
+        file: Any,
+        filepath: Union[pathlib.Path, pathlib.PurePosixPath],
+    ) -> AbstractParser:
         """Parse a policy file"""
         file, filepath = self._fix_filepath(file, filepath)
+        pure_filepath = pathlib.PurePosixPath(filepath)
 
         for lineno, line in enumerate(file, start=1):
             line = line.strip()
 
             # skip empty lines and comments
             if not line or line[0] == "#":
-                self.handle_comment(line, filepath=filepath, lineno=lineno)
+                self.handle_comment(line, filepath=pure_filepath, lineno=lineno)
                 continue
 
             if line.startswith("!"):
@@ -1417,7 +1469,7 @@ class AbstractParser(metaclass=abc.ABCMeta):
                         (included_path,) = params
                     except ValueError as err:
                         raise PolicySyntaxError(
-                            filepath, lineno, "invalid number of params"
+                            pure_filepath, lineno, "invalid number of params"
                         ) from err
                     self.handle_include(
                         pathlib.PurePosixPath(included_path),
@@ -1430,7 +1482,7 @@ class AbstractParser(metaclass=abc.ABCMeta):
                         (included_path,) = params
                     except ValueError as err:
                         raise PolicySyntaxError(
-                            filepath, lineno, "invalid number of params"
+                            pure_filepath, lineno, "invalid number of params"
                         ) from err
                     self.handle_include_dir(
                         pathlib.PurePosixPath(included_path),
@@ -1443,7 +1495,7 @@ class AbstractParser(metaclass=abc.ABCMeta):
                         service, argument, included_path = params
                     except ValueError as err:
                         raise PolicySyntaxError(
-                            filepath, lineno, "invalid number of params"
+                            pure_filepath, lineno, "invalid number of params"
                         ) from err
                     self.handle_include_service(
                         service,
@@ -1468,24 +1520,33 @@ class AbstractParser(metaclass=abc.ABCMeta):
                     self.handle_compat40(filepath=filepath, lineno=lineno)
                     continue
 
-                raise PolicySyntaxError(filepath, lineno, "invalid directive")
+                raise PolicySyntaxError(pure_filepath, lineno, "invalid directive")
 
             # this can raise PolicySyntaxError on its own
             self.handle_rule(
                 self.rule_type.from_line(
-                    self, line, filepath=filepath, lineno=lineno
+                    self, line, filepath=pure_filepath, lineno=lineno
                 ),
-                filepath=filepath,
+                filepath=pure_filepath,
                 lineno=lineno,
             )
 
         return self
 
-    def load_policy_file_service(self, service, argument, file, filepath):
+    def load_policy_file_service(
+        self,
+        service: Optional[str],
+        argument: Optional[str],
+        file: TextIO,
+        filepath: Union[pathlib.Path, pathlib.PurePosixPath],
+    ) -> 'Self': # type: ignore
         """Parse a policy file from ``!include-service``"""
-        file, filepath = self._fix_filepath(file, filepath)
+        file_: io.TextIOWrapper
+        file_, filepath = self._fix_filepath(file, filepath)
 
-        for lineno, line in enumerate(file, start=1):
+        lineno: int
+        line: str
+        for lineno, line in enumerate(file_, start=1):
             line = line.strip()
 
             # skip empty lines and comments
@@ -1519,6 +1580,7 @@ class AbstractParser(metaclass=abc.ABCMeta):
 
                 raise PolicySyntaxError(filepath, lineno, "invalid directive")
 
+            pure_filepath = pathlib.PurePosixPath(filepath)
             # this can raise PolicySyntaxError on its own
             self.handle_rule(
                 self.rule_type.from_line_service(
@@ -1526,19 +1588,23 @@ class AbstractParser(metaclass=abc.ABCMeta):
                     service,
                     argument,
                     line,
-                    filepath=filepath,
+                    filepath=pure_filepath,
                     lineno=lineno,
                 ),
-                filepath=filepath,
+                filepath=pure_filepath,
                 lineno=lineno,
             )
 
-        return self
+        return self # type: ignore
 
     @abc.abstractmethod
     def handle_include(
-        self, included_path: pathlib.PurePosixPath, *, filepath, lineno
-    ):
+        self,
+        included_path: Union[pathlib.Path, pathlib.PurePosixPath],
+        *,
+        filepath: Union[pathlib.Path, pathlib.PurePosixPath],
+        lineno: int,
+    ) -> object:
         """Handle ``!include`` line when encountered in
         :meth:`policy_load_file`.
 
@@ -1548,8 +1614,12 @@ class AbstractParser(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def handle_include_dir(
-        self, included_path: pathlib.PurePosixPath, *, filepath, lineno
-    ):
+        self,
+        included_path: pathlib.PurePosixPath,
+        *,
+        filepath: pathlib.Path,
+        lineno: int,
+    ) -> object:
         """Handle ``!include-dir`` line when encountered in
         :meth:`policy_load_file`.
 
@@ -1560,13 +1630,13 @@ class AbstractParser(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def handle_include_service(
         self,
-        service,
-        argument,
+        service: Optional[str],
+        argument: Optional[str],
         included_path: pathlib.PurePosixPath,
         *,
-        filepath,
-        lineno
-    ):
+        filepath: Union[pathlib.Path, str, pathlib.PurePosixPath],
+        lineno: Optional[int],
+    ) -> object:
         """Handle ``!include-service`` line when encountered in
         :meth:`policy_load_file`.
 
@@ -1575,7 +1645,13 @@ class AbstractParser(metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def handle_rule(self, rule, *, filepath, lineno):
+    def handle_rule(
+        self,
+        rule: Rule,
+        *,
+        filepath: pathlib.PurePosixPath,
+        lineno: int,
+    ) -> object:
         """Handle a line with a rule.
 
         This method is to be provided by subclass.
@@ -1583,14 +1659,25 @@ class AbstractParser(metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def handle_compat40(self, *, filepath, lineno):
+    def collect_targets_for_ask(self, request: Request) -> Set[str]:
+        """Collect targets the user can choose from in 'ask' action
+
+        Word 'targets' is used intentionally instead of 'domains', because it
+        can also contains @dispvm like keywords.
+
+        This method is to be provided by subclass.
+        """
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    def handle_compat40(self, *, filepath: pathlib.Path, lineno: int) -> object:
         """Handle ``!compat-4.0`` line when encountered in :meth:`policy_load_file`.
 
         This method is to be provided by subclass.
         """
         raise NotImplementedError()
 
-    def handle_comment(self, line, *, filepath, lineno):
+    def handle_comment(self, line: str, *, filepath: pathlib.PurePosixPath, lineno: int) -> None:
         """Handle a line with a comment
 
         This method may be overloaded in subclass. By default, it does nothing.
@@ -1600,16 +1687,22 @@ class AbstractParser(metaclass=abc.ABCMeta):
 class AbstractPolicy(AbstractParser):
     """This class is a parser that accumulates the rules to form policy."""
 
-    def __init__(self, *args, **kwds):
-        super().__init__(*args, **kwds)
+    def __init__(self) -> None:
+        super().__init__()
         #: list of Rule objects
         self.rules: List[Rule] = []
 
-    def handle_rule(self, rule, *, filepath, lineno):
+    def handle_rule(
+        self,
+        rule: Rule,
+        *,
+        filepath: Union[pathlib.Path, pathlib.PurePosixPath],
+        lineno: int,
+    ) -> None:
         # pylint: disable=unused-argument
         self.rules.append(rule)
 
-    def evaluate(self, request):
+    def evaluate(self, request: Request) -> AbstractResolution:
         """Evaluate policy
 
         Returns:
@@ -1620,9 +1713,9 @@ class AbstractPolicy(AbstractParser):
         """
 
         rule = self.find_matching_rule(request)
-        return rule.action.evaluate(request)
+        return rule.action.evaluate(request) # type: ignore
 
-    def find_matching_rule(self, request):
+    def find_matching_rule(self, request: Request) -> Rule:
         """Find the first rule matching given request"""
 
         for rule in self.rules:
@@ -1630,12 +1723,12 @@ class AbstractPolicy(AbstractParser):
                 return rule
         raise AccessDenied("no matching rule found")
 
-    def find_rules_for_service(self, service):
+    def find_rules_for_service(self, service: str) -> Iterable[Rule]:
         for rule in self.rules:
             if rule.service is None or rule.service == service:
                 yield rule
 
-    def collect_targets_for_ask(self, request):
+    def collect_targets_for_ask(self, request: Request) -> Set[str]:
         """Collect targets the user can choose from in 'ask' action
 
         Word 'targets' is used intentionally instead of 'domains', because it
@@ -1648,7 +1741,7 @@ class AbstractPolicy(AbstractParser):
         for rule in reversed(self.rules):
             if rule.is_match_but_target(request):
                 # getattr() is for Deny, which doesn't have this attribute
-                rule_target = (
+                rule_target: _BaseTarget = (
                     getattr(rule.action, "target", None) or rule.target
                 )
                 expansion = set(
@@ -1688,15 +1781,20 @@ class AbstractFileLoader(AbstractParser):
     it is possible to overload those functions and use file-like objects.
     """
 
+    __slots__ = ()
     def resolve_path(
-        self, included_path: pathlib.PurePosixPath
+        self, included_path: Union[pathlib.PurePosixPath, pathlib.Path],
     ) -> pathlib.Path:
         """Resolve path from ``!include*`` to :py:class:`pathlib.Path`"""
         raise NotImplementedError()
 
     def resolve_filepath(
-        self, included_path: pathlib.PurePosixPath, *, filepath, lineno
-    ) -> Tuple[TextIO, pathlib.PurePath]:
+        self,
+        included_path: Union[pathlib.Path, pathlib.PurePosixPath],
+        *,
+        filepath: Union[pathlib.PurePosixPath, pathlib.Path, str, None],
+        lineno: Optional[int],
+    ) -> Tuple[TextIO, Union[pathlib.PurePosixPath, pathlib.Path]]:
         """Resolve ``!include[-service]`` to open file and filepath
 
         The callee is responsible for closing the file descriptor.
@@ -1714,8 +1812,12 @@ class AbstractFileLoader(AbstractParser):
                 pathlib.PurePath(resolved_included_path))
 
     def handle_include(
-        self, included_path: pathlib.PurePosixPath, *, filepath, lineno
-    ):
+        self,
+        included_path: Union[pathlib.Path, pathlib.PurePosixPath],
+        *,
+        filepath: Union[pathlib.Path, pathlib.PurePosixPath],
+        lineno: int,
+    ) -> None:
         file, resolved_included_path = self.resolve_filepath(
             included_path, filepath=filepath, lineno=lineno
         )
@@ -1724,14 +1826,14 @@ class AbstractFileLoader(AbstractParser):
 
     def handle_include_service(
         self,
-        service,
-        argument,
+        service: Optional[str],
+        argument: Optional[str],
         included_path: pathlib.PurePosixPath,
         *,
-        filepath,
-        lineno
-    ):
-        service, argument = validate_service_and_argument(
+        filepath: Union[pathlib.Path, pathlib.PurePosixPath, str, None],
+        lineno: Optional[int],
+    ) -> None:
+        validated_service, validated_argument = validate_service_and_argument(
             service, argument, filepath=filepath, lineno=lineno
         )
         file, resolved_included_path = self.resolve_filepath(
@@ -1747,7 +1849,11 @@ class AbstractDirectoryLoader(AbstractFileLoader):
     """Parser that loads next files on ``!include-dir`` directives"""
 
     def resolve_dirpath(
-        self, included_path: pathlib.PurePosixPath, *, filepath, lineno
+        self,
+        included_path: pathlib.PurePosixPath,
+        *,
+        filepath: pathlib.Path,
+        lineno: int
     ) -> pathlib.Path:
         """Resolve ``!include-dir`` to directory path
 
@@ -1765,14 +1871,18 @@ class AbstractDirectoryLoader(AbstractFileLoader):
         return resolved_included_path
 
     def handle_include_dir(
-        self, included_path: pathlib.PurePosixPath, *, filepath, lineno
-    ):
+        self,
+        included_path: pathlib.PurePosixPath,
+        *,
+        filepath: pathlib.Path,
+        lineno: int,
+    ) -> None:
         resolved_included_path = self.resolve_dirpath(
             included_path, filepath=filepath, lineno=lineno
         )
         self.load_policy_dir(resolved_included_path)
 
-    def load_policy_dir(self, dirpath):
+    def load_policy_dir(self, dirpath: pathlib.Path) -> None:
         """Load all files in the directory (``!include-dir``)
 
         Args:
@@ -1794,8 +1904,9 @@ class AbstractFileSystemLoader(AbstractDirectoryLoader, AbstractFileLoader):
             ``!include`` etc. directives are interpreted relative to this path.
     """
 
-    def __init__(self, *, policy_path=POLICYPATH, **kwds):
-        super().__init__(**kwds)
+    __slots__ = ('policy_path',)
+    def __init__(self, *, policy_path: pathlib.Path = POLICYPATH):
+        super().__init__()
         self.policy_path = pathlib.Path(policy_path)
 
         try:
@@ -1805,7 +1916,7 @@ class AbstractFileSystemLoader(AbstractDirectoryLoader, AbstractFileLoader):
                 "failed to load {} file: {!s}".format(err.filename, err)
             ) from err
 
-    def resolve_path(self, included_path):
+    def resolve_path(self, included_path: Union[pathlib.PurePosixPath, pathlib.Path]) -> pathlib.Path:
         return (self.policy_path / included_path).resolve()
 
 
@@ -1822,13 +1933,13 @@ class FilePolicy(AbstractFileSystemLoader, AbstractPolicy):
     >>> await resolution.execute('process-ident')  # asynchroneous method
     """
 
-    def handle_compat40(self, *, filepath, lineno):
+    def handle_compat40(self, *, filepath: pathlib.Path, lineno: int) -> None:
         """"""
         # late import for circular
         from .parser_compat import Compat40Loader
 
         subparser = Compat40Loader(master=self)
-        subparser.execute(filepath=filepath, lineno=lineno)
+        subparser.execute(filepath=str(filepath), lineno=lineno)
 
 
 class ValidateParser(FilePolicy):
@@ -1840,12 +1951,14 @@ class ValidateParser(FilePolicy):
     """
 
     def __init__(
-        self, *args, overrides: Dict[pathlib.Path, Optional[str]], **kwds
+        self,
+        overrides: Dict[pathlib.Path, Optional[str]],
+        policy_path: pathlib.Path,
     ):
         self.overrides = overrides
-        super().__init__(*args, **kwds)
+        super().__init__(policy_path=policy_path)
 
-    def load_policy_dir(self, dirpath):
+    def load_policy_dir(self, dirpath: pathlib.Path) -> None:
         for path in filter_filepaths(dirpath.iterdir()):
             if path not in self.overrides:
                 with path.open() as file:
@@ -1855,8 +1968,12 @@ class ValidateParser(FilePolicy):
                 self.load_policy_file(io.StringIO(content), path)
 
     def resolve_filepath(
-        self, included_path: pathlib.PurePosixPath, *, filepath, lineno
-    ) -> Tuple[TextIO, pathlib.PurePath]:
+        self,
+        included_path: Union[pathlib.Path, pathlib.PurePosixPath],
+        *,
+        filepath: Union[pathlib.PurePosixPath, pathlib.Path, str, None],
+        lineno: Optional[int],
+    ) -> Tuple[TextIO, Union[pathlib.Path, pathlib.PurePosixPath]]:
         path = self.resolve_path(included_path)
         if path in self.overrides:
             if self.overrides[path] is None:
@@ -1870,7 +1987,7 @@ class ValidateParser(FilePolicy):
             included_path, filepath=filepath, lineno=lineno
         )
 
-    def handle_rule(self, rule, *, filepath, lineno):
+    def handle_rule(self, rule: object, *, filepath: object, lineno: object) -> None:
         pass
 
 
@@ -1879,23 +1996,70 @@ class ToposortMixIn:
     # pylint can't deal with mixins
     # pylint: disable=no-member
 
+    policy_path: pathlib.Path
+
+
+class StringLoader(AbstractFileLoader):
+    """An in-memory loader used for tests
+
+    Args:
+        policy (dict or str): policy dictionary. The keys are filenames to be
+            included. It should contain ``'__main__'`` key which is loaded. If
+            the argument is :py:class:`str`, it behaves as it was dict's
+            ``'__main__'``.
+    """
+
+    def __init__(self, *args, policy, **kwds):
+        super().__init__(*args, **kwds)
+        self.policy = policy
+
+    def resolve_filepath(self,
+                         included_path: Union[pathlib.Path, pathlib.PurePosixPath],
+                         *,
+                         filepath: Union[pathlib.Path, pathlib.PurePosixPath, str, None],
+                         lineno: Optional[int]) -> Tuple[io.StringIO, pathlib.PurePosixPath]:
+        """
+        Raises:
+            qrexec.exc.PolicySyntaxError: when wrong path is included
+        """
+        included_path_str = str(included_path)
+        try:
+            file = io.StringIO(self.policy[included_path_str])
+        except KeyError as err:
+            raise exc.PolicySyntaxError(
+                filepath,
+                lineno,
+                "no such policy file: {!r}".format(included_path_str),
+            ) from err
+        return file, pathlib.PurePosixPath(included_path_str + "[in-memory]")
+
+    def handle_include_dir(
+        self,
+        included_path: object,
+        *,
+        filepath: object,
+        lineno: int,
+    ):
+        raise NotImplementedError(
+            "!include-dir is unsupported in {}".format(type(self).__name__)
+        )
+
+
+class StringPolicy(ToposortMixIn, StringLoader, AbstractPolicy):
+    """String policy, used for tests and loading single files as policy. It
+    can be used to test most of the code paths used in policy parsing.
+
+    >>> testpolicy = StringPolicy(policy={
+    ...     '__main__': '!include policy2'
+    ...     'policy2': '* * @anyvm @anyvm allow'})
+    """
     @enum.unique
     class State(enum.Enum):
         """State of topological sort algorithm"""
 
         ON_PATH, IN_ORDER = object(), object()
 
-    def __init__(self, **kwds):
-        self.included_paths = collections.defaultdict(set)
-        super().__init__(**kwds)
-
-        # keys and values are paths to files
-        self.state = {}
-        self.order = []
-
-        self.queue = None
-
-    def _path_to_key(self, path):
+    def _path_to_key(self, path: pathlib.PurePosixPath) -> str:
         assert isinstance(path, pathlib.PurePosixPath)
         try:
             path = path.relative_to(self.policy_path)
@@ -1907,7 +2071,7 @@ class ToposortMixIn:
             pass
         return str(path)
 
-    def toposort(self):
+    def toposort(self) -> Iterable[Tuple[io.IOBase, pathlib.Path]]:
         """Yield (file, filename) in order suitable for mass-uploading.
 
         A file does not include anything from any file that follows in the
@@ -1917,18 +2081,21 @@ class ToposortMixIn:
         """
         if not self.order:
             self.queue = set(self.included_paths.keys())
-            self.queue.update(itertools.chain(self.included_paths.values()))
+            self.queue.update(itertools.chain(self.included_paths.values())) # type: ignore
             while self.queue:
                 self.dfs(self.queue.pop())
 
         for path in self.order:
-            yield self.resolve_filepath(path, filepath=None, lineno=None)
+            yield self.resolve_filepath(path, filepath=None, lineno=None) #type: ignore
 
-    def dfs(self, node):
+    def dfs(self, node: Any) -> None:
         """Perform one batch of topological sort"""
         self.state[node] = self.State.ON_PATH
+        assert False
 
         for nextnode in self.included_paths[node]:
+            assert isinstance(node, str), f"Wrong type for node: {type(node)!r}"
+            assert type(node) is str
             if self.state[nextnode] == self.State.ON_PATH:
                 raise ValueError(
                     "circular include; {} → {}".format(
@@ -1938,13 +2105,14 @@ class ToposortMixIn:
             if self.state[nextnode] == self.State.IN_ORDER:
                 continue
 
+            assert self.queue is not None
             self.queue.discard(nextnode)
             self.dfs(nextnode)
 
         self.order.append(node)
         self.state[node] = self.State.IN_ORDER
 
-    def save_included_path(self, included_path, *, filepath, lineno):
+    def save_included_path(self, included_path, *, filepath, lineno: Optional[int]) -> None:
         """Store the vertex in the dependency graph.
 
         Only paths inside :py:attr:`policy_path` and ``include`` directory
@@ -1968,8 +2136,12 @@ class ToposortMixIn:
         self.included_paths[key].add(included_path)
 
     def handle_include(
-        self, included_path: pathlib.PurePosixPath, *, filepath, lineno
-    ):
+        self,
+        included_path: Union[pathlib.PurePosixPath, pathlib.Path],
+        *,
+        filepath: Union[pathlib.Path, pathlib.PurePosixPath],
+        lineno: int,
+    ) -> None:
         # pylint: disable=missing-docstring
         logging.debug(
             "Toposorter.handle_include(included_path=%r, filepath=%r)",
@@ -2006,50 +2178,6 @@ class ToposortMixIn:
         super().load_policy_file(file, filepath)
 
 
-class StringLoader(AbstractFileLoader):
-    """An in-memory loader used for tests
-
-    Args:
-        policy (dict or str): policy dictionary. The keys are filenames to be
-            included. It should contain ``'__main__'`` key which is loaded. If
-            the argument is :py:class:`str`, it behaves as it was dict's
-            ``'__main__'``.
-    """
-
-    def __init__(self, *args, policy, **kwds):
-        super().__init__(*args, **kwds)
-        self.policy = policy
-
-    def resolve_filepath(
-        self,
-        included_path,
-        *,
-        filepath,
-        lineno,
-    ) -> Tuple[TextIO, pathlib.PurePath]:
-        """
-        Raises:
-            qrexec.exc.PolicySyntaxError: when wrong path is included
-        """
-        included_path = str(included_path)
-        try:
-            file = io.StringIO(self.policy[included_path])
-        except KeyError as err:
-            raise exc.PolicySyntaxError(
-                filepath,
-                lineno,
-                "no such policy file: {!r}".format(included_path),
-            ) from err
-        return file, pathlib.PurePosixPath(included_path + "[in-memory]")
-
-    def handle_include_dir(
-        self, included_path: pathlib.PurePosixPath, *, filepath, lineno
-    ):
-        raise NotImplementedError(
-            "!include-dir is unsupported in {}".format(type(self).__name__)
-        )
-
-
 class StringPolicy(ToposortMixIn, StringLoader, AbstractPolicy):
     """String policy, used for tests and loading single files as policy. It
     can be used to test most of the code paths used in policy parsing.
@@ -2062,6 +2190,13 @@ class StringPolicy(ToposortMixIn, StringLoader, AbstractPolicy):
     def __init__(self, *, policy, policy_compat=None, **kwds):
         if not isinstance(policy, collections.abc.Mapping):
             policy = {"__main__": policy}
+        self.included_paths = collections.defaultdict(set)
+
+        # keys and values are paths to files
+        self.state = {}
+        self.order = []
+
+        self.queue = None
         super().__init__(policy=policy, **kwds)
         if policy_compat is None:
             policy_compat = {}
@@ -2072,7 +2207,7 @@ class StringPolicy(ToposortMixIn, StringLoader, AbstractPolicy):
         with file:
             self.load_policy_file(file, filepath)
 
-    def handle_compat40(self, *, filepath, lineno):
+    def handle_compat40(self, *, filepath: pathlib.Path, lineno: int) -> None:
         """"""
         # late import for circular
         from .parser_compat import TestCompat40Loader

@@ -18,6 +18,7 @@
 # You should have received a copy of the GNU Lesser General Public
 # License along with this library; if not, see <https://www.gnu.org/licenses/>.
 
+from __future__ import annotations
 import json
 import socket
 import subprocess
@@ -89,7 +90,7 @@ def qubesd_call(dest: str, method: str, arg: Optional[str]=None,
         raise
 
     # src, method, dest, arg
-    call_header = f"{method}+{arg or ''} dom0 name {dest}\0"
+    call_header = f"{method}+{arg} dom0 name {dest}\0"
     client_socket.sendall(call_header.encode("ascii"))
     if payload is not None:
         client_socket.sendall(payload)
@@ -147,7 +148,7 @@ def prepare_subprocess_kwds(input: object) -> Dict[str, object]:
     elif isinstance(input, bytes):
         kwds["input"] = input
     elif isinstance(input, str):
-        kwds["input"] = input.encode()
+        kwds["input"] = input.encode('ascii', 'strict')
     else:
         # XXX this breaks on file-like objects that don't have .fileno
         kwds["stdin"] = input
