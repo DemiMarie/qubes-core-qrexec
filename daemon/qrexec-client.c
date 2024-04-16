@@ -66,11 +66,13 @@ static _Noreturn void do_exec(const char *prog,
                               const char *cmdline,
                               const char *username __attribute__((unused)))
 {
-    /* Avoid calling RPC command through shell.
-     * Qrexec-client is always in a login session. */
-    exec_qubes_rpc_if_requested2(prog, cmdline, environ, false);
+    /* avoid calling RPC service through shell */
+    if (prog) {
+        /* qrexec-client is always in a login session. */
+        exec_qubes_rpc2(prog, cmdline, environ, false);
+    }
 
-    /* if above haven't executed RPC command, pass it to shell */
+    /* if above haven't executed RPC service, pass it to shell */
     execl("/bin/bash", "bash", "-c", cmdline, NULL);
     PERROR("exec bash");
     exit(1);
