@@ -431,9 +431,8 @@ static void wake_meminfo_writer(void)
 }
 
 static int try_fork_server(int type, int connect_domain, int connect_port,
-        char *cmdline, size_t cmdline_len, const char *username) {
+        char *cmdline, const char *username) {
     char *colon;
-    char *fork_server_socket_path;
     int s = -1;
     struct sockaddr_un remote;
     struct qrexec_cmd_info info;
@@ -446,22 +445,19 @@ static int try_fork_server(int type, int connect_domain, int connect_port,
     if (!colon)
         goto fail;
 
-    if (asprintf(&fork_server_socket_path, fork_server_path, username) < 0) {
-        LOG(ERROR, "Memory allocation failed");
+    int bytes = snprintf(remote.sun_path, sizeof(remote.sun_path),
+                         fork_server_path, username);
+    if (bytes < 0 || bytes >= (int)sizeof(remote.sun_path)) {
+        LOG(ERROR, "snprintf() failed");
         goto fail;
     }
-
-    remote.sun_path[sizeof(remote.sun_path) - 1] = '\0';
     remote.sun_family = AF_UNIX;
-    strncpy(remote.sun_path, fork_server_socket_path,
-            sizeof(remote.sun_path) - 1);
-    free(fork_server_socket_path);
 
-    if ((s = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) {
+    if ((s = socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0)) == -1) {
         PERROR("socket");
         goto fail;
     }
-    size_t len = strlen(remote.sun_path) + sizeof(remote.sun_family);
+    size_t len = offsetof(struct sockaddr_un, sun_path) + (size_t)bytes + 1;
     if (connect(s, (struct sockaddr *) &remote, (socklen_t)len) == -1) {
         if (errno != ECONNREFUSED && errno != ENOENT)
             PERROR("connect");
@@ -472,10 +468,7 @@ static int try_fork_server(int type, int connect_domain, int connect_port,
     info.type = type;
     info.connect_domain = connect_domain;
     info.connect_port = connect_port;
-    size_t username_len = (size_t)(colon - cmdline);
-    assert(cmdline_len <= INT_MAX);
-    assert(cmdline_len > username_len);
-    info.cmdline_len = (int)(cmdline_len - (username_len + 1));
+    info.cmdline_len = strlen(colon + 1) + 1;
     if (!write_all(s, &info, sizeof(info))) {
         PERROR("write");
         goto fail;
@@ -636,7 +629,6 @@ static void handle_server_exec_request_do(int type,
                                           char *cmdline) {
     int client_fd;
     pid_t child_agent;
-    size_t cmdline_len = strlen(cmdline) + 1; // size of cmdline, including \0 at the end
     struct exec_params params = {
         .connect_domain = connect_domain,
         .connect_port = connect_port,
@@ -671,7 +663,7 @@ static void handle_server_exec_request_do(int type,
         /* try fork server */
         int child_socket = try_fork_server(type,
                 params.connect_domain, params.connect_port,
-                cmdline, cmdline_len, cmd->username);
+                cmdline, cmd->username);
         if (child_socket >= 0) {
             register_vchan_connection(-1, child_socket,
                     params.connect_domain, params.connect_port);
