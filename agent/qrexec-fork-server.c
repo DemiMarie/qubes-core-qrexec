@@ -64,6 +64,10 @@ _Noreturn void handle_vchan_error(const char *op)
 }
 
 static void handle_single_command(int fd, struct qrexec_cmd_info *info) {
+    if (info->type == MSG_SERVICE_CONNECT) {
+        LOG(ERROR, "Fork server received MSG_SERVICE_CONNECT");
+        return;
+    }
     unsigned int cmdline_len = info->cmdline_len;
     if (cmdline_len > (unsigned int)INT_MAX) {
         LOG(ERROR, "Overly long cmdline (%u bytes) recieved!", cmdline_len);
