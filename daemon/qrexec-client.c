@@ -99,7 +99,7 @@ _Noreturn static void usage(const char *const name, int status)
             "  -E, --no-exit-code - always exit with 0 after command exits\n"
             "  -t - enables replacing problematic bytes with '_' in command output, -T is the same for stderr\n"
             "  -W - waits for connection end even in case of VM-VM (-c)\n"
-            "  -c - connect to existing process (response to trigger service call)\n"
+            "  -c - connect to existing process (deprecated, only used for tests)\n"
             "  -w timeout - override default connection timeout of 5s (set 0 for no timeout)\n"
             "  -k - kill the domain right before exiting\n"
             "  --socket-dir=PATH -  directory for qrexec socket, default: %s\n"
