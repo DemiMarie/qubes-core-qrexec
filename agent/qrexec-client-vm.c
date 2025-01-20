@@ -96,6 +96,7 @@ enum {
     opt_no_filter_stdout = 't'+128,
     opt_no_filter_stderr = 'T'+128,
     opt_use_stdin_socket = 'u'+128,
+    opt_close_fds        = 'c'+128,
 };
 
 static struct option longopts[] = {
@@ -107,6 +108,7 @@ static struct option longopts[] = {
     { "agent-socket", required_argument, 0, 'a'},
     { "prefix-data", required_argument, 0, 'p' },
     { "use-stdin-socket", no_argument, 0, opt_use_stdin_socket },
+    { "close-fds", no_argument, 0, opt_close_fds},
     { "help", no_argument, 0, 'h' },
     { NULL, 0, 0, 0},
 };
@@ -146,6 +148,7 @@ int main(int argc, char **argv)
     int inpipe[2], outpipe[2];
     int buffer_size = 0;
     int opt;
+    int null_fd = -1;
     int stdout_fd = 1;
     const char *agent_trigger_path = QREXEC_AGENT_TRIGGER_PATH, *prefix_data = NULL;
 
@@ -187,6 +190,15 @@ int main(int argc, char **argv)
                 break;
             case 'h':
                 usage(argv[0], 0);
+            case opt_close_fds:
+                if (null_fd != -1)
+                    err(1, "--close-fds passed twice");
+                null_fd = open("/dev/null", O_RDWR|O_CLOEXEC);
+                if (null_fd == -1)
+                    err(1, "open /dev/null");
+                if (null_fd < 3)
+                    err(1, "standard stream closed at startup");
+                break;
             case 'p':
                 if (prefix_data)
                     usage(argv[0], 2);
@@ -323,6 +335,18 @@ int main(int argc, char **argv)
         }
         close(inpipe[0]);
         close(outpipe[1]);
+        if (null_fd != -1) {
+            for (int i = 0, r; i < 3; ++i) {
+                for (;;) {
+                    r = dup2(null_fd, i);
+                    if (r == i)
+                        break;
+                    assert(r == -1);
+                    if (errno != EINTR && errno != EBUSY)
+                        err(1, "dup2(%d, %d)", null_fd, i);
+                }
+            }
+        }
 
         ret = handle_data_client(MSG_SERVICE_CONNECT,
                 exec_params.connect_domain, exec_params.connect_port,
